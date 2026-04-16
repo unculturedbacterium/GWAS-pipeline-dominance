@@ -266,8 +266,8 @@ def regex_plt(df, rg, max_cols = 10, full = True):
            .opts(frame_width = 300, frame_height = 300,show_legend = False, title = rg)
 
 def megaHeatmap(df, sets, cpallete = ['Greys','OrRd', 'Purples', 'Blues', 'Greens', 'Oranges', 'Reds',
-                          'PuRd', 'RdPu', 'BuPu',
-                          'GnBu', 'PuBu', 'BuGn', 'YlGn'], scale_column=True, row_clusters = False, **bokeh_opts):
+                          'PuRd', 'RdPu', 'BuPu','GnBu', 'PuBu', 'BuGn', 'YlGn'], 
+                 text_font_size="5pt", scale_column=True, row_clusters = False, **bokeh_opts):
     figstack = []
     figstackna = []
     bokeh_opts = dict(width = 1450, height = 2000)|bokeh_opts
@@ -291,13 +291,13 @@ def megaHeatmap(df, sets, cpallete = ['Greys','OrRd', 'Purples', 'Blues', 'Green
         tempdf = df.filter(regex = i).select_dtypes(include = 'number')
         if not scale_column or not tempdf.shape[1]:
             fig = tempdf.hvplot.heatmap(rot = 90, cmap = cmap, colorbar=False, shared_axes = False)
-            labels = hv.Labels(fig).opts( text_font_size="5pt", text_color="black" )
+            labels = hv.Labels(fig).opts( text_font_size=text_font_size, text_color="black" )
             fig = fig*labels
         else: 
             fig_lis = (tempdf[[tcol]].hvplot.heatmap(rot = 90, cmap = cmap, colorbar=False, shared_axes = False)\
                          for tcol in tempdf.columns)
-            fig_lis  = (fig*hv.Labels(fig).opts( text_font_size="5pt", text_color="black" ) for fig in fig_lis)
-            fig = reduce(lambda x,y: x*y, fig_lis  )
+            fig_lis  = (fig*hv.Labels(fig).opts( text_font_size=text_font_size, text_color="black" ) for fig in fig_lis)
+            fig = reduce(lambda x,y: x*y, fig_lis)
         figstack += [fig.opts(xaxis = 'top')]
         figstackna += [df.filter(regex = i).isna().hvplot.heatmap(cmap = 'greys', alpha = 1, rot = 90, colorbar=False, xaxis = 'top')]
     

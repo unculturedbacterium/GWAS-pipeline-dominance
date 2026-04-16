@@ -11,6 +11,10 @@ dependencies:
   - cuml=25.04
   - cugraph=25.04
   - cuvs=25.04
+  - pytorch=*=*cuda*   
+  - transformer-engine-torch=2.3.0
+  - cuda-nvcc
+  - cuda-cudart-dev
   - cupy
   - jax
   - dask
@@ -45,7 +49,6 @@ dependencies:
   - prophet
   - lightgbm
   - shap
-  - scikit-optimize
   - xgboost
   - nltk
   - pygraphviz
@@ -63,8 +66,8 @@ dependencies:
   - jinja2 #=3.1.2
   - geckodriver
   - tabulate
-  - ensembl-vep=112.0
-  - pymc[version='>=5']
+  - "ensembl-vep>=112"
+  - pymc>=5
   - bambi
   - transformers
   - python-kaleido
@@ -85,15 +88,19 @@ dependencies:
   - r-plyr
   - r-readxl
   - pandoc
-  - pytorch=*=*cuda*   
   - r-purrr
   - r-dplyr
   - r-data.table
   - imagemagick
+  - plink2
+  - bcftools
   - pip
   - pip:
     - goatools
-    - dash-bio==1.0.1
+    - alphagenome
+    # - evo2
     #- enformer-pytorch    # uncomment this line when you’re ready to reinstall
+
+
 
 

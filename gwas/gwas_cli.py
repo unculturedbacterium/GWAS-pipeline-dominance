@@ -60,13 +60,14 @@ def main():
     if not dictionary['phewas_path']: dictionary['phewas_path'] = f'{path}phewasdb.parquet.gz'
         
     if not dictionary['regressout']:
-        df = pd.read_csv(f'{path}{pj}/processed_data_ready.csv',
-                         dtype={'rfid': str}).drop_duplicates(subset='rfid')
-        if not dictionary['traits']:
-            traits_ = df.columns[df.columns.str.startswith('regressedlr_')]
+        if not dictionary['pheno']: 
+            df = pd.read_csv(f'{path}{pj}/processed_data_ready.csv', dtype={'rfid': str}).drop_duplicates(subset='rfid')
+        else: 
+            df = pd.read_csv(dictionary['pheno'], dtype={'rfid': str}).drop_duplicates(subset='rfid')
+        if not dictionary['traits']: traits_ = df.columns[df.columns.str.contains('regressedlr_')]
         elif 'prefix_' in dictionary['traits']: 
             pref = dictionary['traits'].replace('prefix_', '')
-            traits_ = df.columns[df.columns.str.startswith(f'regressedlr_{pref}')]
+            traits_ = df.columns[df.columns.str.contains(f'regressedlr_{pref}')]
         else: traits_ = dictionary['traits'].split(',')
         try: traits_d = gg.get_trait_descriptions_f(pd.read_csv(f'{path}{pj}/data_dict_{pj}.csv'), traits_)
         except: traits_d = ['UNK' for x in range(len(traits_))]
@@ -112,10 +113,14 @@ def main():
         else: gwas.SubsetAndFilter(makefigures = False, **kws)
     if dictionary['grm']: 
         gwas.generateGRM(**kw(dictionary, 'grm_')) ###essential
-    if dictionary['h2'] :  gwas.snpHeritability() ###essential
-    if dictionary['BLUP'] : gwas.BLUP()
+    if dictionary['h2']:  gwas.snpHeritability() ###essential
+    if dictionary['BLUP']: gwas.BLUP()
     if dictionary['BLUP_predict']: gwas.BLUP_predict(dictionary['BLUP_predict']);
-    if dictionary['gwas']: gwas.fastGWAS(skip_already_present=dictionary['skip_already_present_gwas']) ###essential
+    if dictionary['gwas']: 
+        if dictionary['skip_already_present_gwas']: dictionary['gwas_skip_already_present'] = 1
+        kws = kw(dictionary, 'gwas_')
+        #gwas.fastGWAS(skip_already_present=dictionary['skip_already_present_gwas']) ###essential
+        gwas.fastGWAS(**kws) ###essential
     if dictionary['db'] and not dictionary['nodb']: gwas.addGWASresultsToDb(researcher=dictionary['researcher'],
                                                  round_version=dictionary['round'], 
                                                  gwas_version=dictionary['gwas_version'])

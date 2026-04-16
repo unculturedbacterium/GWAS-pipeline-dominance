@@ -11,6 +11,8 @@ import pandas as pd
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import argrelextrema
 import nltk
+from scipy.sparse.csgraph import shortest_path
+
 
 def sps2fig(sparse_matrix, ids):
     res = pd.DataFrame(sparse_matrix.todense(), columns=ids, index = ids )
@@ -347,6 +349,39 @@ def sum_powers_pruned(
         Pk = Pk_next
     S.eliminate_zeros()
     return S
+
+def generation_deltas_from_predecessors(E, indices):
+    """
+    Returns
+    -------
+    sp_dist : (m, n) float array
+    sp_path : (m, n) int array
+    delta   : (m, n) float array
+        delta[k, j] = generation(j) - generation(indices[k])
+        along the chosen shortest path
+    """
+    E = E.tocsr()
+    U = (E + E.T).tocsr()
+    U.sum_duplicates()
+    U.eliminate_zeros()
+    if U.nnz: U.data[:] = 1
+    sp_dist, sp_path = shortest_path( U, directed=False, unweighted=True, indices=indices, return_predecessors=True)
+    m, n = sp_path.shape
+    delta = np.full((m, n), np.nan, dtype=float)
+    # source delta = 0
+    delta[np.arange(m), indices] = 0
+    finite = np.isfinite(sp_dist)
+    if not finite.any(): return sp_dist, sp_path, delta
+    maxd = int(np.nanmax(sp_dist[finite]))
+    for d in tqdm(range(1, maxd + 1)):
+        rows, cols = np.where(sp_dist == d)
+        if len(rows) == 0: continue
+        pred = sp_path[rows, cols]
+        # +1 if pred -> col exists in E, else -1
+        forward = np.asarray(E[pred, cols]).ravel() != 0
+        step = np.where(forward, 1.0, -1.0)
+        delta[rows, cols] = delta[rows, pred] + step
+    return sp_dist, sp_path, delta
 
 
 # Phi, A = kinship_from_child_parent(sped2) 

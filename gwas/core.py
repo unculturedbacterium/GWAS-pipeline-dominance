@@ -47,7 +47,7 @@ from prophet.utilities import regressor_coefficients
 from scipy.cluster.hierarchy import ward, dendrogram, leaves_list, linkage
 from scipy.spatial import distance
 from scipy.spatial.distance import cdist
-from scipy.stats import pearsonr, zscore
+from scipy.stats import pearsonr, zscore, norm
 from sklearn.compose import ColumnTransformer
 from sklearn.decomposition import PCA
 from sklearn.feature_extraction.text import TfidfTransformer
@@ -153,6 +153,7 @@ def makeqr(text, fillcolor = 'black', backcolor = 'white'):
 def save_bokeh_png(fig, filename, scale_factor=2):
     try: export_png(hv.render(fig.opts(toolbar=None), backend='bokeh'), filename=filename, scale_factor=scale_factor)
     except: export_png(hv.render(fig, backend='bokeh'), filename=filename, scale_factor=scale_factor)
+    fig.opts(toolbar = 'above')
 
 def make_labels(fig, func=lambda v: f"{v:.2f}", text_color_dark = 'black', text_color_light = 'white', luminance_threshold = .55 ,**kws): 
     data = fig.data.copy()
@@ -4475,7 +4476,7 @@ class gwas_pipe:
         del future
         return 1
 
-    def fastGWAS(self, traitlist: list = [], chrlist: list = [], skip_already_present = False, print_call: bool = False, **kwards):
+    def fastGWAS(self, traitlist: list = [], chrlist: list = [], skip_already_present = False, print_call: bool = False,threads = 1, **kwards):
         """
         Perform fast GWAS (Genome-Wide Association Study) for specified traits and chromosomes.
     
@@ -4513,7 +4514,7 @@ class gwas_pipe:
         chrsingrm = pd.read_csv(f'{self.path}grm/listofchrgrms.txt', header = None)[0]\
                       .map(lambda x: basename(x).replace('chrGRM', '')).to_list()
         ranges = chrlist if len(chrlist) else [i for i in range(1,self.n_autosome+5) if i != self.n_autosome+3]
-        path, gcta, nauto, genotypes   = self.path, self.gcta , self.n_autosome, self.genotypes_subset
+        path, gcta, nauto, genotypes  = self.path, self.gcta , self.n_autosome, self.genotypes_subset
         num2xymt =  lambda x: str(int(float(x))).replace(str(nauto+1), 'x')\
                                                 .replace(str(nauto+2), 'y')\
                                                 .replace(str(nauto+4), 'mt')
@@ -4525,7 +4526,7 @@ class gwas_pipe:
                           output files already present, to change this behavior use skip_already_present = False''')
             else:
                 subgrmflag = f'--mlma-subtract-grm {path}grm/{chromp2}chrGRM' if chromp2 in chrsingrm else ''
-                bash(f'{gcta} --thread-num 1 --pheno {path}data/pheno/{trait}.txt --bfile {genotypes} \
+                bash(f'{gcta} --thread-num {threads} --pheno {path}data/pheno/{trait}.txt --bfile {genotypes} \
                                            --grm {path}grm/AllchrGRM --autosome-num {nauto} \
                                            --chr {chrom} {subgrmflag} --mlma \
                                            --out {path}results/gwas/{trait}_chrgwas{chromp2}', 
@@ -5141,7 +5142,7 @@ class gwas_pipe:
                           ['rfid', 'sex']].rename(lambda x: x.replace('regressedlr_', 'normalized '), axis =1), on = 'rfid')
         
         for name, row in tqdm(list(out.iterrows())):
-            isduplicate = (temp[[f'normalized {row.trait}', row.trait]].diff(axis = 1).sum().sum() < 1e-6)
+            isduplicate = (temp[[f'normalized {row.trait}', row.trait]].diff(axis = 1).abs().sum().sum() < 1e-6)
             f, ax = plt.subplots(1, 2 if not isduplicate else 1, figsize = (12 if not isduplicate else 8, 6), dpi=72)
             if len(temp[f'normalized {row.trait}'].dropna().unique()) <= 4:
                 for num, ex in enumerate(['normalized '] if isduplicate else ['normalized ', '']):
@@ -6557,7 +6558,7 @@ class gwas_pipe:
             return
         return fig
 
-    def GWAS_latent_space(self, traitlist: list = [], method: str = 'nmf'):
+    def GWAS_latent_space(self, traitlist: list = [], method: str = 'fa', mlma_col = 'z-score', n_components = 5):
         """
         Generate a latent space representation of GWAS results using various dimensionality reduction methods.
     
@@ -6605,15 +6606,20 @@ class gwas_pipe:
                 else:  pass
             if len(df_gwas) == 0 :  printwithlog(f'could not open mlma files for {t}')
             df_gwas = pd.concat(df_gwas)
-            fdf += [df_gwas.assign(**{f'{t}_p': -np.log10(df_gwas.p)}).set_index('SNP')[[f'{t}_p']]]
+            if mlma_col== 'p-value': fdf += [df_gwas.assign(**{f'{t}_p': -np.log10(df_gwas.p)}).set_index('SNP')[[f'{t}_p']]]
+            elif mlma_col == 'z-score': fdf += [df_gwas.assign(**{f'{t}_p': df_gwas.b/df_gwas.se}).set_index('SNP')[[f'{t}_p']]]
+            else: raise ValueError('mlma_col as to be either "z-score" or "p-value"')
+            if num < (len(traitlist)-1):
+                del df_gwas
+                gc.collect()
         fdf = pd.concat(fdf, axis = 1)
-        
         from sklearn.decomposition import SparsePCA, NMF, FactorAnalysis, FastICA, DictionaryLearning
-        npc= min(len(traitlist)-1, 10)
+        npc = min(len(traitlist)-1, 10) if n_components is None else n_components
         pca = {'nmf': NMF(n_components=npc), 'pca':  PCA(n_components=npc), 'ica': FastICA(n_components=npc),  'da': DictionaryLearning(n_components=npc),  
                'spca':  SparsePCA(n_components=npc), 'fa': FactorAnalysis(n_components=npc) }[method]
-        if len(fdf.count().unique()): display(fdf.count().agg(['max', 'min']))
+        # if len(fdf.count().unique()): display(fdf.count().agg(['max', 'min']))
         out = pca.fit_transform(fdf.fillna(0))
+        if  mlma_col == 'z-score': out = -np.log10(2 * norm.sf(np.abs(out)))
         pcadata = pd.DataFrame(pca.components_, columns = fdf.columns[fdf.columns.str.contains('_p$')].map(lambda x: x[:-2]),
                                index =[f'{pref[method]}{i+1}' for i in range(npc)] )
         if method == 'nmf':
@@ -6621,7 +6627,6 @@ class gwas_pipe:
             normed_pcdata = (pcadata.T/pcadata.sum(axis = 1))
             exp_avg_p = (mean_p*normed_pcdata.T).sum(axis = 1)
             out = (out*(exp_avg_p/out.mean(axis=0)).values)
-        
         if method == 'pca':
             pcadata.index = pcadata.index + pd.Series(pca.explained_variance_ratio_).map(lambda x: f' ({round(x*100, 2)}%)')
         model = SpectralCoclustering(n_clusters=npc).fit(pcadata)
@@ -6651,6 +6656,7 @@ class gwas_pipe:
         abvt['p'] = 10**(-dfm['-log10p'].abs())
         abvt = abvt.rename({'-log10p':'realp'}, axis = 1).reset_index(drop= True)
         oo = self.callQTLs( NonStrictSearchDir=abvt, add_founder_genotypes = True,conditional_analysis=False, displayqtl= False, save = False, annotate= False)
+        display(oo)
         if len(oo):
             oo = self.annotate(oo, save= False)
             send2d = oo.drop(['p', 'color', 'x', 'trait_description', 'Chr', 'bp'], axis = 1).rename({'realp': '-log10p'}, axis = 1)
@@ -7014,12 +7020,15 @@ The decompositions used also allow to extimate a metric of similarity between th
             genes_in_range = pd.read_csv(f"{self.path}results/qtls/genes_in_range.csv")
         else: genes_in_range = pd.read_csv(path)
         gtf = self.get_gtf() if not hasattr(self, 'gtf') else self.gtf
+        def newtab_link(url, label="🔗"):
+            return f"""<a href="#"
+            onclick="window.open('{url}', '_blank', 'noopener,noreferrer'); return false;">{label}</a>"""
         _genecardmk = lambda gene: f'''<a href="https://www.genecards.org/cgi-bin/carddisp.pl?gene={gene}" target="_blank">🔗</a>''' if not pd.isna(gene) else ''
         _gwashubmk = lambda gene : f'''<a href="https://www.ebi.ac.uk/gwas/genes/{gene}" target="_blank">🔗</a>''' if not pd.isna(gene) else ''
         _twashubmk = lambda gene :  f'''<a href="http://twas-hub.org/genes/{gene.upper()}" target="_blank">🔗</a>'''  if not pd.isna(gene) else ''
-        _genecupmk = lambda gene : f'''<a href="https://genecup.org/progress?type=brain&type=addiction&type=drug&type=function&type=psychiatric&type=cell&type=stress&type=GWAS&query={gene})" target="_blank">🔗</a>''' \
-                                   if not pd.isna(gene) else ''
+        _genecupmk = lambda gene : f'''<a href="https://genecup.org/progress?type=brain&type=addiction&type=drug&type=function&type=psychiatric&type=cell&type=stress&type=GWAS&query={gene})" target="_blank">🔗</a>''' if not pd.isna(gene) else ''
         _genebassmk = lambda ensid: f'''<a href="https://app.genebass.org/gene/{ensid}?burdenSet=pLoF&phewasOpts=1&resultLayout=full" target="_blank">🔗</a>''' if not pd.isna(ensid) else ''
+        _opentargetsmk = lambda ensid:  f'''<a href="https://platform.opentargets.org/target/{ensid}/associations" target="_blank">🔗</a>''' if not pd.isna(ensid) else ''
         _rgdhtmk = lambda gene: f'''<a href="https://rgd.mcw.edu/rgdweb/report/gene/main.html?id={gene.split(":")[-1]}" target="_blank">🔗</a>''' if not pd.isna(gene) else ''
         def tryloc(x):
             try: return f"{x['chr']}:{x['start']}-{x['end']}"
@@ -7036,8 +7045,6 @@ The decompositions used also allow to extimate a metric of similarity between th
         
         gene_annt = query_gene(genes_in_range.gene, self.taxid)[[ 'name', 'symbol', 'AllianceGenome', 'ensembl', 'entrezgene']]
         gene_annt['ensembl'] = gene_annt['ensembl'].map(lambda x: x[0] if isinstance(x, list) else x).map(lambda x: x['gene'] if isinstance(x, dict) else x)
-        gene_annt = gene_annt
-        
         genes_in_range = genes_in_range.rename({'gene': 'symbol'}, axis =1).merge(gene_annt.drop('symbol', axis = 1), 
                                                                                   left_on = ['symbol','description'], right_on =['query', 'name'], how = 'left')
         hgenes = query_gene(genes_in_range.symbol, species = 'human')['ensembl'].map(lambda x: x[0] if isinstance(x, list) else x).map(lambda x: x['gene'] if isinstance(x, dict) else x).dropna()
@@ -7046,7 +7053,7 @@ The decompositions used also allow to extimate a metric of similarity between th
         genes_in_range = genes_in_range.merge(hgenes.rename('ensemblh'), left_on = 'symbol', right_on = 'query', how = 'left')
         #genes_in_range['ensemblh'] =genes_in_range['ensemblh'].fillna('')
         list_of_cols =  [('genecard','symbol' ,_genecardmk), ('gwashub', 'symbol' ,_gwashubmk), ('genecup', 'symbol', _genecupmk), 
-                       ('twashub', 'symbol' ,_twashubmk), ('genebass', 'ensemblh' ,_genebassmk)]
+                       ('twashub', 'symbol' ,_twashubmk), ('genebass', 'ensemblh' ,_genebassmk), ('opentargets', 'ensemblh' ,_opentargetsmk)]
         if self.species == 'rattus_norvegicus': list_of_cols += [('RGD','AllianceGenome', _rgdhtmk )]
         for idx,_col,fu in list_of_cols:
             genes_in_range[idx] = genes_in_range[_col].map(fu)
@@ -7544,7 +7551,7 @@ Defining columns:
             c_num  = row.Chr if isinstance(snp_doc.split('_')[0], int) else int(self.replaceXYMTtonums(snp_doc.split('_')[0]))
             if len(ginrange := genes_in_range2.query('SNP_origin.eq(@row.TopSNP)')):
                 girantable = fancy_display(ginrange.fillna(''), download_name= f'genes_in_region__{row.trait}__{snp_doc}.csv', 
-                                             add_sort=False, wrap_text='wrap', html_cols=['genebass', 'twashub', 'genecup', 'gwashub', 'RGD', 'genecard'], 
+                                             add_sort=False, wrap_text='wrap', html_cols=['genebass', 'twashub', 'genecup', 'gwashub', 'RGD', 'genecard', 'opentargets'], 
                                              page_size = 40, cell_font_size=10, header_font_size=12,max_width=1200,  layout = 'fit_data_fill', flexible = True)
                 giran = pn.Card(girantable, title = 'Gene Links', collapsed = False, min_width=500)
                 all_genes_string = ', '.join(ginrange.symbol.unique())
@@ -9816,7 +9823,9 @@ def make_zip_comparison_report(zip1, zip2, nauto = 20, save = True):
     template.save(f'report_comparision{zip1.split("/")[-1]}vs{zip2.split("/")[-1]}_{tdy.strftime("%Y%b%d")}.html', resources=INLINE,  title='GWAS comparison')
     return template
 
-
+# from alphagenome.models import dna_client
+# from scipy.spatial.distance import hamming
+# from alphagenome.models.dna_client import OutputType
 class AlphaGenome:
     def __init__(self, gwas_pipe, alpha_genome_key_path = "ALPHAGENOME_KEY"):
         from alphagenome.models import dna_client
@@ -9834,6 +9843,7 @@ class AlphaGenome:
         self.supported_species = ['MUS_MUSCULUS','HOMO_SAPIENS']
         
     def get_gene_region(self,genepos, sequence_length = 'SEQUENCE_LENGTH_100KB', region_align = 'center'):
+        from alphagenome.models import dna_client
         if sequence_length not in self.supported_sequences:
             raise ValueError('sequence length has to be in ' + str(list(dna_client.SUPPORTED_SEQUENCE_LENGTHS.keys())) )
         length = dna_client.SUPPORTED_SEQUENCE_LENGTHS[sequence_length]       
@@ -9851,6 +9861,7 @@ class AlphaGenome:
     def get_genotypes_in_region(self, genepos, min_count_haplotypes = 10,  sequence_length = 'SEQUENCE_LENGTH_100KB', 
                                 use_raw_genotypes = False, species = 'HOMO_SAPIENS', snplist = None, region_align = 'center',
                                 topSNP = None, subset_snps_from_topsnp_r2 = .8, skip_founder_alphagenome = False):
+        from scipy.spatial.distance import hamming
         fstart, fend, seq, c = self.get_gene_region(genepos=genepos, sequence_length = sequence_length, region_align = region_align )
         length = fend - fstart
         seq_set = []
@@ -9921,6 +9932,8 @@ class AlphaGenome:
         return ''.join(seqarray).upper()
         
     def predict_sequence(self, seq, species = 'HOMO_SAPIENS'):
+        from alphagenome.models.dna_client import OutputType
+        from alphagenome.models import dna_client
         organism=dna_client.Organism.MUS_MUSCULUS if species == 'MUS_MUSCULUS' else dna_client.Organism.HOMO_SAPIENS
         sleep(5)
         return self.dna_model.predict_sequence( sequence=seq.upper(), organism = organism, 
@@ -10014,20 +10027,20 @@ class AlphaGenome:
         (totrnadelta[totrnadelta.delta_RNA_SEQ.abs()>totrnadelta.delta_RNA_SEQ.abs().quantile(.5)]\
                     .hvplot.line(x = 'bp', y = 'delta_RNA_SEQ', by = 'biosample_name', rasterize=True, downsample=True, 
                                  frame_width =1000, frame_height =100, legend = False, xaxis = 'top', shared_axes=False)*snplines)\
-            .opts( xaxis = 'top', xformatter=NumeralTickFormatter(format='0,0.[0000]a'))+\
-        totsplicedelta.hvplot.line(x = 'bp', y = 'delta_SPLICE_SITE_USAGE', by = 'biosample_name', rasterize=True, downsample=True, 
-                                 frame_width =1000, frame_height =100, legend = False, xaxis = None, shared_axes=False)*snplines+\
-        tothistdelta.hvplot.line(x = 'bp', y = 'delta_CHIP_HISTONE', by = [ 'histone_mark'],
-                                rasterize=True, downsample=True, frame_width =1000, legend = False, frame_height =100,xaxis = None,)*snplines+\
-        tottfdelta[tottfdelta.transcription_factor.str.contains('POL') &  ~tottfdelta.biosample_name.str.contains("liver")]\
+            .opts( xaxis = 'top', xformatter=NumeralTickFormatter(format='0,0.[0000]a'),  hooks = [hook_plot_borders])+\
+        (totsplicedelta.hvplot.line(x = 'bp', y = 'delta_SPLICE_SITE_USAGE', by = 'biosample_name', rasterize=True, downsample=True, 
+                                 frame_width =1000, frame_height =100, legend = False, xaxis = None, shared_axes=False)*snplines).opts(hooks = [hook_plot_borders])+\
+        (tothistdelta.hvplot.line(x = 'bp', y = 'delta_CHIP_HISTONE', by = [ 'histone_mark'],
+                                rasterize=True, downsample=True, frame_width =1000, legend = False, frame_height =100,xaxis = None,)*snplines).opts(hooks = [hook_plot_borders])+\
+        (tottfdelta[tottfdelta.transcription_factor.str.contains('POL') &  ~tottfdelta.biosample_name.str.contains("liver")]\
                           .rename({'delta_CHIP_TF': 'deltaPOL2|CTCF'}, axis = 1)\
                           .hvplot.line(x = 'bp', y = 'deltaPOL2|CTCF', by = ['biosample_name', 'transcription_factor'],
-                               rasterize=True, downsample=True, frame_width =1000, legend = False,frame_height =100, xaxis = None,  )*snplines\
-                             .opts( axiswise=True)+\
-        tottfdelta[~tottfdelta.transcription_factor.str.contains('CTCF|POL')&  ~tottfdelta.biosample_name.str.contains("liver")]\
+                               rasterize=True, downsample=True, frame_width =1000, legend = False,frame_height =100, xaxis = None,  )*snplines)\
+                             .opts( axiswise=True,hooks = [hook_plot_borders])+\
+        (tottfdelta[~tottfdelta.transcription_factor.str.contains('CTCF|POL')&  ~tottfdelta.biosample_name.str.contains("liver")]\
                            .hvplot.line(x = 'bp', y = 'delta_CHIP_TF', by = ['biosample_name', 'transcription_factor'],
-                               rasterize=True, downsample=True, frame_width =1000, legend = False, frame_height =100,xaxis = None,)*snplines+\
-        genetrack
+                               rasterize=True, downsample=True, frame_width =1000, legend = False, frame_height =100,xaxis = None,)*snplines).opts(hooks = [hook_plot_borders])+\
+        genetrack.opts(hooks = [hook_plot_borders])
         ).cols(1)
     
         
@@ -10071,9 +10084,11 @@ class AlphaGenome:
                                      value_vars=delta_tf.columns, var_name='bp', value_name='TF_binding')\
                                     .astype({'bp': float, 'TF_binding' : float})
         line_tf = delta_tfm.loc[:].hvplot.line(x= 'bp', y = 'TF_binding', by = 'transcription_factor' , downsample=True,
-                                               rasterize=True, frame_width =1000, legend = None).opts(xaxis = None) 
+                                               rasterize=True, frame_width =1000, legend = None).opts(xaxis = None, hooks = [hook_plot_borders]) 
         ###############################
-        return (line_ex*snp_pos+line_tf*snp_pos+genetrack).cols(1)
+        return ((line_ex*snp_pos.opts(hooks = [hook_plot_borders]))+\
+                (line_tf*snp_pos).opts(hooks = [hook_plot_borders])+\
+                genetrack.opts(hooks = [hook_plot_borders])).cols(1)
 
 def longest_prefix(a, b, suffix = False, return_pos = False):
     if suffix: a,b = a[::-1], b[::-1]

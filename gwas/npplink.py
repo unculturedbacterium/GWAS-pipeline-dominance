@@ -719,45 +719,23 @@ def rm_relatedness(c, trait, df, allgrms, n_components = None,return_eigen=True,
                 'h2': h2_res['h2'], 'n_components':n_components}
     return pd.Series(transformed, index = idx, name = f'{trait}__subtractgrm{c}')
 
-def scale_with_mask(X, precision = np.float32):
+def scale_with_mask(X, precision = np.float32, center = True, scale = True):
     X = np.asarray(X, dtype=precision)
     M = ~np.isnan(X)
-    X_centered = X - np.nanmean(X, axis=0)
-    X_centered[~M] = 0.0
+    if center:
+        X_centered = X - np.nanmean(X, axis=0)
+        X_centered[~M] = 0.0
+    else: 
+        X_centered = X 
+        X_centered[~M] = 0.0
+    if not scale: return X_centered, np.ones(X.shape[1], dtype=precision), M.astype(precision)
     sum_sq = np.einsum("ij,ij->j", X_centered, X_centered, optimize=True)
     std = np.sqrt(sum_sq / M.sum(axis=0))
     std[std == 0] = np.nan
     X_scaled = X_centered / std
     return X_scaled, std, M.astype(precision)
 
-def regression_with_einsum_old(ssnps, straits, snps_mask, traits_mask,dof='correct', stat = 'ttest', sided = 'two-sided'):
-    if sided not in ['two-sided','one-sided']: raise ValueError("sided must be 'two-sided' or 'one-sided'")
-    if stat  not in ['ttest', 'wald']: raise ValueError("stat must be 'ttest' or 'wald'")
-    # Compute cross-product between SNPs and traits.
-    XtY = np.einsum("ij,ik->jk", ssnps, straits, optimize=True)  # shape: (num_snps, num_traits)
-    # Compute sum of squares of SNP values (over individuals where the trait is observed).
-    diag_XtX = np.einsum("ij,ik->jk", ssnps**2, traits_mask, optimize=True)
-    # Compute sum of squares of trait values over overlapping samples.
-    term1 = np.einsum("ij,ik->jk", snps_mask, traits_mask * (straits**2), optimize=True)
-    # Compute the number of overlapping (non-missing) individuals for each SNP–trait pair.
-    if dof!='incorrect': df = np.einsum("ij,ik->jk", snps_mask, traits_mask, optimize=True) - 1
-    else:  df = np.broadcast_to(traits_mask.sum(axis=0) - 1 , (ssnps.shape[1], traits_mask.shape[1])).copy()
-    df[df <= 0] = np.nan 
-    beta = XtY / diag_XtX
-    SSR = term1 - 2 * beta * XtY + beta**2 * diag_XtX
-    #sigma2 = SSR / df
-    se_beta = np.sqrt(SSR / df / diag_XtX)
-    stats = beta / se_beta
-    if stat == 'ttest':
-        p_values = (2 if sided == 'two-sided' else 1) * scipyt.sf(np.abs(stats), df=df)
-    else:
-        np.square(stats, out = stats) # *= stats
-        p_values = chi2.sf(stats, df=1)
-        if sided == 'one-sided': p_values = np.where(beta >= 0, 0.5 * p_values, 1 - 0.5 * p_values)
-    neg_log10_p_values = -np.log10(p_values)
-    return beta, se_beta, stats, neg_log10_p_values, df
-
-def regression_with_einsum(ssnps, straits, snps_mask, traits_mask,dof='correct', stat = 'ttest', sided = 'two-sided'):
+def regression_with_einsum(ssnps, straits, snps_mask, traits_mask,dof='correct', stat = 'ttest', sided = 'two-sided', center = True,):
     if sided not in ['two-sided','one-sided']: raise ValueError("sided must be 'two-sided' or 'one-sided'")
     if stat  not in ['ttest', 'wald', 'score']: raise ValueError("stat must be 'ttest' or 'wald'")
     XtY      = np.empty((ssnps.shape[1],straits.shape[1]), dtype=float)
@@ -770,8 +748,8 @@ def regression_with_einsum(ssnps, straits, snps_mask, traits_mask,dof='correct',
     np.einsum("ij,ik,ik->jk", snps_mask, phen, phen, out=ssr, optimize=True)
     if dof!='incorrect': 
         np.einsum("ij,ik->jk", snps_mask, traits_mask, out=df,  optimize=True)
-        df -= 1
-    else: df = np.broadcast_to(traits_mask.sum(axis=0) - 1 , (ssnps.shape[1], traits_mask.shape[1])).copy()
+        df -= 2 if center else 1
+    else: df = np.broadcast_to(traits_mask.sum(axis=0) - (2 if center else 1), (ssnps.shape[1], traits_mask.shape[1])).copy()
     df[df <= 0] = np.nan
     beta = XtY
     beta /= diag
@@ -792,34 +770,64 @@ def regression_with_einsum(ssnps, straits, snps_mask, traits_mask,dof='correct',
     np.negative(p_values, out=p_values)
     return beta, se_beta, stats, p_values, df
 
-# def GWA(traits, snps, dtype = 'pandas', precision=np.float32, stat = 'ttest', sided = 'two-sided'):
-#     if isinstance(snps, tuple) and len(snps)==3: ssnps, snps_std, snps_mask = snps
-#     else: ssnps, snps_std, snps_mask = scale_with_mask(snps, precision = precision)
-#     if isinstance(traits, tuple) and len(snps)==3: straits, traits_std, traits_mask = traits
-#     straits, traits_std, traits_mask = scale_with_mask(traits, precision = precision)
-#     if dtype == 'tuple':  
-#         return regression_with_einsum(ssnps, straits, snps_mask, traits_mask, dof = 'correct', stat = stat, sided = sided)
-#     res = xr.DataArray(
-#              np.stack(regression_with_einsum(ssnps, straits, snps_mask, traits_mask, dof = 'correct', stat = stat, sided = sided), axis=0), 
-#              dims=["metric", "snp", "trait"],
-#              coords={"metric": np.array(['beta', 'beta_se', 'stat', 'neglog_p', 'dof']),
-#                      "snp":   list(snps.columns),
-#                      "trait": traits.columns.map(lambda x: x.split('__subtractgrm')[0]).to_list()} )
-#     if dtype == 'pandas':  return res.to_dataset(dim="metric").to_dataframe().reset_index()
-#     return res
 
-def GWA(traits, snps, dtype = 'pandas_highmem', precision=np.float32, stat = 'ttest', sided = 'two-sided',dof='correct'):
+def regression_with_blas(ssnps, straits, snps_mask, traits_mask, dof='correct', stat='ttest', sided='two-sided', center=True):
+    if sided not in ['two-sided', 'one-sided']: raise ValueError("sided must be 'two-sided' or 'one-sided'")
+    if stat not in ['ttest', 'wald', 'score']: raise ValueError("stat must be 'ttest', 'wald', or 'score'")
+    acc_dtype = np.result_type(ssnps.dtype, straits.dtype, snps_mask.dtype, traits_mask.dtype)
+    XtY  = np.empty((ssnps.shape[1], straits.shape[1]), dtype=acc_dtype, order='C')
+    diag = np.empty_like(XtY, order='C')
+    ssr  = np.empty_like(XtY, order='C')
+    df   = np.empty_like(XtY, order='C')
+    ssnps2 = np.empty_like(ssnps, dtype=acc_dtype, order='C')
+    phen2  = np.empty_like(straits, dtype=acc_dtype, order='C')
+    np.dot(ssnps.T, straits, out=XtY)
+    np.square(ssnps, out=ssnps2)
+    np.dot(ssnps2.T, traits_mask, out=diag)
+    np.multiply(straits, traits_mask, out=phen2)
+    np.square(phen2, out=phen2)
+    np.dot(snps_mask.T, phen2, out=ssr)
+    if dof != 'incorrect':
+        np.dot(snps_mask.T, traits_mask, out=df)
+        df -= (2 if center else 1)
+    else: df = np.broadcast_to( traits_mask.sum(axis=0) - (2 if center else 1), (ssnps.shape[1], straits.shape[1])).astype(float, copy=True)
+    df[df <= 0] = np.nan
+    diag[diag <= 0] = np.nan
+    beta = XtY
+    np.divide(beta, diag, out=beta)
+    if stat != 'score': ssr -= (beta * beta) * diag
+    np.divide(ssr, df * diag, out=ssr)
+    np.sqrt(ssr, out=ssr)
+    se_beta = ssr
+    stats = np.empty_like(beta, order='C')
+    np.divide(beta, se_beta, out=stats)
+    if stat == 'ttest':
+        p_values = scipyt.sf(np.abs(stats), df=df)
+        if sided == 'two-sided': p_values *= 2
+    elif stat in ['wald', 'score']:
+        np.abs(stats, out=stats)
+        p_values = erfc(stats / np.sqrt(2))
+        if sided == 'one-sided': p_values *= 0.5
+        np.square(stats, out=stats)
+    np.log10(p_values, out=p_values)
+    np.negative(p_values, out=p_values)
+    return beta, se_beta, stats, p_values, df
+
+def GWA(traits, snps, dtype = 'pandas_highmem', precision=np.float32, stat = 'ttest', sided = 'two-sided',dof='correct', center =True, scale = True, regression_mode = 'blas' ):
     if isinstance(snps, tuple) and len(snps)==3: ssnps, snps_std, snps_mask = snps
-    else: ssnps, snps_std, snps_mask = scale_with_mask(snps, precision = precision)
-    if isinstance(traits, tuple) and len(snps)==3: straits, traits_std, traits_mask = traits
-    straits, traits_std, traits_mask = scale_with_mask(traits, precision = precision)
-    results = regression_with_einsum(ssnps, straits, snps_mask, traits_mask, dof = dof, stat = stat, sided = sided)
-    metrics     = ['beta', 'beta_se', 'stat', 'neglog_p', 'dof']
+    else: ssnps, snps_std, snps_mask = scale_with_mask(snps, precision = precision, center = center, scale = scale)
+    if isinstance(traits, tuple) and len(traits)==3: straits, traits_std, traits_mask = traits
+    else: straits, traits_std, traits_mask = scale_with_mask(traits, precision = precision, center = center, scale = scale)
+    if regression_mode == 'blas':
+        results = regression_with_blas(ssnps, straits, snps_mask, traits_mask, dof = dof, stat = stat, sided = sided, center = center)
+    if regression_mode == 'einsum':
+        results = regression_with_einsum(ssnps, straits, snps_mask, traits_mask, dof = dof, stat = stat, sided = sided, center = center)
+    metrics = ['beta', 'beta_se', 'stat', 'neglog_p', 'dof']
     snp_names, trait_names   = list(snps.columns), [t.split('__subtractgrm')[0] for t in traits.columns]
-    if dtype not in ['tuple', 'xarray', 'pandas', 'pandas_highmem']: raise ValueError(" dtype has to be in ['tuple', 'xarray', 'pandas']")
+    if dtype not in ['tuple', 'xarray', 'pandas', 'pandas_highmem', 'xarray_dataset']: raise ValueError(" dtype has to be in ['tuple', 'xarray', 'pandas']")
     if dtype == 'tuple':  return results
     elif dtype == 'xarray_dataset':
-        return xr.Dataset( { m: (('snp','trait'), arr) for m,arr in zip(metrics, results) },
+        return xr.Dataset( { m: (('snp', 'trait'), arr) for m, arr in zip(metrics, results) },
             coords={'snp': snp_names, 'trait': trait_names})
     elif dtype in ['xarray', 'pandas_highmem']:
         xar =  xr.DataArray( np.stack(results, axis=0),dims=["metric", "snp", "trait"],
@@ -856,15 +864,16 @@ def GWAS(traitdf, genotypes = 'genotypes/genotypes', grms_folder = 'grm', save =
             print('reordering snps to align with traits')
             snps =snps.loc[traits.index]
         if return_table: 
-            res += [GWA(traits, snps, dtype=dtype, stat=stat, dof='correct')]
+            res += [GWA(traits, snps, dtype=dtype, stat=stat, dof=dof)]
             if save: res[-1].to_parquet(f'{save_path}gwas{C}.parquet.gz', compression='gzip', engine = 'pyarrow',  compression_level=1, use_dictionary=True)
         else: 
-            if save: GWA(traits, snps, dtype=dtype, stat=stat, dof='correct')\
+            if save: GWA(traits, snps, dtype=dtype, stat=stat, dof=dof)\
                            .to_parquet(f'{save_path}gwas{C}.parquet.gz', compression='gzip',  engine = 'pyarrow',  compression_level=1, use_dictionary=True) #use_byte_stream_split=True
     if return_table: 
         if 'pandas' not in dtype: return res
         return pd.concat(res)
     return
+
 
 
 def describe_trait_chr(traitdf, grms_folder = 'grm', return_allchrs=False, include_cols = ['transformed', 'blup', 'U', 'D_inv_sqrt', 'h2', 'n_components']):
