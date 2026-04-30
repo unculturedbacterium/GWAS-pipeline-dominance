@@ -1,124 +1,122 @@
-# GWAS-pipeline
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18869198.svg)](https://doi.org/10.5281/zenodo.18869198)
+# dominance-gwas-pipeline
 
-This package is a *potpourri* of genetic analysis tools to:
-1) perform ***GWAS*** species and uses the *NCBI datasets* to get genetic information of that species
-2) perform downstream analysis to investigate further the identified ***QTLs***
-3) wrap all the results into a *HTML* report that contains all the performed analyses.
+`dominance-gwas-pipeline` is a trimmed derivative of the original [GWAS-pipeline](https://github.com/sanchestm/GWAS-pipeline), reduced to the parts needed for dominance-aware SNP association testing.
 
-## Input Files 
+This repo keeps:
 
-| File    | is_essential? | format | defaultname |
-| --------| ------------ | ------ | --------- |
-| Genotypes  | ✅    | (.bim,.bed,.fam) | None |
-| Phenotypes | ✅    | .csv    | raw_data.csv |
-| Data dictionary | ✅    | .csv | data_dict_{projectname}.csv| 
-| Phewas db  | ⬜️    | .parquet.gz | phewasdb.parquet.gz |
-| Founder genotypes| ⬜️ |(.bim,.bed,.fam) | None |
+- the edited `npplink.py` implementation with additive and additive+dominance GWAS
+- a lightweight results summarizer for dominance hits
+- simple Manhattan and locuszoom plotting helpers
+- a minimal Conda environment
 
-Currently, the pipeline is centered around PLINK for SNP data in the `.bim|.bam|.fam` format (from PLINK 1.96). The Genotype data ***has*** to have the SNPs encoded in the format `{CHR}:{POS}` and thus is currently limited to biallelic SNPs (this information is in the `.bim` file). The code also requires individual `iid` and `fid` to be the same, please check if the `.fam` file to make sure that  
+This repo does **not** keep the broader reporting, enrichment, database, phenotype-processing, or downstream QTL framework from the original project.
 
-Meanwhile, the phenotype data is written in the `CSV` format and requires 2 essential columns: `rfid` and `sex`. The `sex` column is encoded as 'M' for males and 'F' for females. If the species does not have sex, encode all individuals as females 'F'. Individuals with missing sex ***will be dropped***. All columns have to be in lower case.
+## What the model does
 
-Last, the main essential file is the data dictionary. It tells the pipeline which columns are metadata, covariates or traits and for each trait which covariates are used. There are 4 essential columns `measure`, `trait_covariate`, `covariates` and `description`. `measure` will be the columns of the phenotype data file. `trait_covariate` can be {`metadata`,`covariate_categorical`,`covariate_continuous`,`trait`}. `covariates` can be `nan`, `passthrough` or a comma-separated list covariates that are present in the phenotype file and are also a column in the data dictionary file. `description` is a longer description for traits and covariates. We build a helper function `generate_datadic` to facilitate building this file from the phenotype file. Please see the example in `example/example_chitre_obs.ipynb`
-| measure        | trait_covariate       | covariates   | description                             |
-|:---------------|:----------------------|:-------------|:----------------------------------------|
-|rfid|metadata|nan|id of individual|
-| sex            | covariate_categorical | nan          | sex                                     |
-| age            | covariate_continuous  | nan          | age of individual                       |
-| trait1         | trait                 | passthrough  | this trait will not have any covariate |
-| trait2         | trait                 | sex,age  | this trait will be adjusted for sex and age |
+The dominance-aware model follows the encoding used in Cui et al. 2023, "Dominance is common in mammals and is associated with trans-acting gene expression and alternative splicing".
 
-## Parameters
+- Additive encoding: `0 / 1 / 2`
+- Dominance encoding: `0 / 1 / 0`
+- Joint model: additive + dominance
+- Non-additive test: additive-only vs additive+dominance
 
-| parameter    | what |is_essential? | defaultvalue | note |
-| --------|--- |------------ | --------- |  ---- |
-| threshold| significance threshold  | ✅    |  'auto' | if auto, it will calculate the threshold with 1000 normal traits, this will increase the wall time by a lot |
-| threshold05| secondary higher significance threshold | ✅    | 5.643286 |
-| genome_accession| NCBI genome accession | ✅    | 'GCF_015227675.2' | if run in the notebook errors will trigger a helper function to find the genome_accession, requires user input |
-| threads|  number of threads | ✅ | os.cpu_count() | in a HPC please set this value, because the os.cpu_count() can differ to the resources requested |
+Important result columns from the `add-dom` run:
+
+- `neglog_p_additive`: additive-only association
+- `neglog_p_add_joint`: additive term inside the joint additive+dominance model
+- `neglog_p_dominance`: dominance term inside the joint model
+- `neglog_p_avsad`: additive-only vs additive+dominance comparison
+- `dominance_class`: heuristic classification (`A`, `PD`, `CD`, `OD`)
 
 ## Installation
 
-We use `conda` to manage the installation of all necessary packages. Given the generalist nature of this project, there are a lot of dependencies for which the classic conda solver can be slow. Please consider updating conda and making sure that the solver is `libmamba`. Also consider adding the bioconda and conda-forge channels too.
-
-```
-conda update -n base conda
-conda install -n base conda-libmamba-solver
-conda config --set solver libmamba
-conda config --add channels defaults
-conda config --add channels bioconda
-conda config --add channels conda-forge
+```bash
+git clone https://github.com/unculturedbacterium/dominance-gwas-pipeline.git
+cd dominance-gwas-pipeline
+conda env create -f environment.yml
+conda activate dominance-gwas
 ```
 
+## Included modules
 
-for downloading the GWAS-pipeline use `git clone` and then create the necessary conda environment
+- [dominance_gwas/npplink.py](dominance_gwas/npplink.py): PLINK reader, GRM utilities, additive GWAS, and additive+dominance GWAS
+- [dominance_gwas/results.py](dominance_gwas/results.py): load and summarize `add-dom` parquet outputs
+- [dominance_gwas/plotting.py](dominance_gwas/plotting.py): simple Manhattan and locuszoom plotting
 
-```
-git clone https://github.com/sanchestm/GWAS-pipeline.git
-conda env create -f GWAS-pipeline/environment.yml
-pip install -e GWAS-pipeline
-```
+## Minimal usage
 
-## directory management
+```python
+import pandas as pd
+from dominance_gwas import GWAS
 
-We suggest following one of these standards for data management.
+traits = pd.read_parquet("phenotypes.parquet")
 
-```
-path2projects/
-├── projectname/
-│   ├── raw_data.csv
-│   ├── data_dict_projectname.csv
-├── genotypes/
-│   ├── geno.bim
-│   ├── geno.fam
-│   ├── geno.bam
-└── phewasdb.parquet.gz
-```
-```
-path2projects/
-└── projectname/
-   ├── raw_data.csv
-   ├── data_dict_projectname.csv
-   ├── geno.bim
-   ├── geno.fam
-   ├── geno.bam
-   └── phewasdb.parquet.gz
+GWAS(
+    traitdf=traits[["trait_of_interest"]],
+    genotypes="path/to/plink_prefix",
+    grms_folder="path/to/grm_folder",
+    save=True,
+    save_path="results/gwas_addom/",
+    return_table=False,
+    y_correction="ystar",
+    dtype="pandas_highmem",
+    model="add-dom",
+    regression_mode="einsum",
+    center=True,
+    scale=True,
+)
 ```
 
-## CLI
+This writes chromosome-wise files like:
 
-for the `CLI` version of the code we can use the `run` flag or we can list the operations that have to be performed. 
+- `gwas1.addom.parquet.gz`
+- `gwas2.addom.parquet.gz`
 
-```
-cd GWAS-pipeline
-gwas-cli\
-       path=path2projects/ \
-       genome_accession=GCF_015227675.2 \
-       round=versionofgenotypes\
-       founder_genotypes=none \
-       project=projectname\
-       threads=8\
-       threshold=5.4\
-       phewas_path=phewasdb.parquet.gz\
-       runall
-```
+## Summarizing add-dom results
 
-```
-cd GWAS-pipeline
-gwas-cli\
-       path=path2projects/ \
-       genome_accession=GCF_015227675.2 \
-       round=versionofgenotypes\
-       founder_genotypes=none \
-       project=projectname\
-       threads=8\
-       phewas_path=phewasdb.parquet.gz\
-       clear_directories subset h2 db gwas threshold=5.4 qtl store phewas goea eqtl gcorr locuszoom sqtl report
+```python
+from dominance_gwas import summarize_adddom_results
+
+summary = summarize_adddom_results(
+    "results/gwas_addom/",
+    threshold=7.5,
+    save=True,
+)
 ```
 
+This writes:
 
+- `dominance_summary.parquet.gz`
+- `dominance_hits.csv`
 
+## Plotting
 
+```python
+from dominance_gwas import load_adddom_results, manhattan_plot, locuszoom_plot
 
+results = load_adddom_results("results/gwas_addom/")
 
+manhattan_plot(
+    results,
+    score_col="neglog_p_dominance",
+    threshold=7.5,
+    output_path="manhattan_dominance.png",
+)
+
+locuszoom_plot(
+    results,
+    lead_snp="9:98405863",
+    score_col="neglog_p_dominance",
+    output_path="locuszoom_9_98405863.png",
+)
+```
+
+## Notes
+
+- This repo is focused on SNP-level dominance-aware GWAS only.
+- The current plotting helpers are intentionally lightweight and do not reproduce the full original `core.py` plotting/report stack.
+- The code is best suited for PLINK `bed/bim/fam` genotype inputs where SNP names follow the `CHR:POS` convention.
+
+## Provenance
+
+This repo was derived from the upstream `GWAS-pipeline` project and then reduced to a smaller dominance-focused codebase. The original project and license are preserved in spirit and attribution.
