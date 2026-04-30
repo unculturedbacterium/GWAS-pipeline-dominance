@@ -1,4 +1,4 @@
-# dominance-gwas-pipeline
+# GWAS-pipeline-dominance-aware
 
 `dominance-gwas-pipeline` is a trimmed derivative of the original [GWAS-pipeline](https://github.com/sanchestm/GWAS-pipeline), reduced to the parts needed for dominance-aware SNP association testing.
 
