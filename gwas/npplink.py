@@ -6,6 +6,7 @@ import pandas as pd
 import dask.dataframe as dd
 import numba
 from sklearn.utils.extmath import randomized_svd
+from scipy.stats import f as scipyf
 from scipy.stats import t as scipyt
 from scipy.stats import chi2
 from scipy.special import stdtr, erfc
@@ -735,6 +736,32 @@ def scale_with_mask(X, precision = np.float32, center = True, scale = True):
     X_scaled = X_centered / std
     return X_scaled, std, M.astype(precision)
 
+
+def dominance_encoding(X, precision=np.float32):
+    X = np.asarray(X, dtype=precision)
+    out = np.full(X.shape, np.nan, dtype=precision)
+    mask = ~np.isnan(X)
+    out[mask] = (X[mask] == 1).astype(precision)
+    return out
+
+
+def _neglog10_pvalues(p_values):
+    p_values = np.asarray(p_values, dtype=np.float64)
+    smallest = np.finfo(p_values.dtype).tiny
+    p_values = np.clip(p_values, smallest, 1.0)
+    return -np.log10(p_values)
+
+
+def _dominance_class_from_ratio(ratio):
+    ratio = np.asarray(ratio, dtype=np.float64)
+    out = np.full(ratio.shape, 'UNK', dtype=object)
+    valid = np.isfinite(ratio) & (ratio >= 0)
+    out[valid & (ratio < 0.2)] = 'A'
+    out[valid & (ratio >= 0.2) & (ratio < 0.8)] = 'PD'
+    out[valid & (ratio >= 0.8) & (ratio < 1.2)] = 'CD'
+    out[valid & (ratio >= 1.2)] = 'OD'
+    return out
+
 def regression_with_einsum(ssnps, straits, snps_mask, traits_mask,dof='correct', stat = 'ttest', sided = 'two-sided', center = True,):
     if sided not in ['two-sided','one-sided']: raise ValueError("sided must be 'two-sided' or 'one-sided'")
     if stat  not in ['ttest', 'wald', 'score']: raise ValueError("stat must be 'ttest' or 'wald'")
@@ -813,11 +840,201 @@ def regression_with_blas(ssnps, straits, snps_mask, traits_mask, dof='correct', 
     np.negative(p_values, out=p_values)
     return beta, se_beta, stats, p_values, df
 
-def GWA(traits, snps, dtype = 'pandas_highmem', precision=np.float32, stat = 'ttest', sided = 'two-sided',dof='correct', center =True, scale = True, regression_mode = 'blas' ):
+
+def regression_add_dom_with_blas(sadd, sdom, straits, snps_mask, traits_mask, dof='correct', sided='two-sided', center=True):
+    if sided not in ['two-sided', 'one-sided']:
+        raise ValueError("sided must be 'two-sided' or 'one-sided'")
+    acc_dtype = np.result_type(sadd.dtype, sdom.dtype, straits.dtype, snps_mask.dtype, traits_mask.dtype)
+    x1ty = np.empty((sadd.shape[1], straits.shape[1]), dtype=acc_dtype, order='C')
+    x2ty = np.empty_like(x1ty, order='C')
+    s11 = np.empty_like(x1ty, order='C')
+    s22 = np.empty_like(x1ty, order='C')
+    s12 = np.empty_like(x1ty, order='C')
+    yty = np.empty_like(x1ty, order='C')
+    nobs = np.empty_like(x1ty, order='C')
+    phen2 = np.empty_like(straits, dtype=acc_dtype, order='C')
+    x1sq = np.empty_like(sadd, dtype=acc_dtype, order='C')
+    x2sq = np.empty_like(sdom, dtype=acc_dtype, order='C')
+    x1x2 = np.empty_like(sadd, dtype=acc_dtype, order='C')
+
+    np.dot(sadd.T, straits, out=x1ty)
+    np.dot(sdom.T, straits, out=x2ty)
+    np.square(sadd, out=x1sq)
+    np.square(sdom, out=x2sq)
+    np.multiply(sadd, sdom, out=x1x2)
+    np.dot(x1sq.T, traits_mask, out=s11)
+    np.dot(x2sq.T, traits_mask, out=s22)
+    np.dot(x1x2.T, traits_mask, out=s12)
+
+    np.multiply(straits, traits_mask, out=phen2)
+    np.square(phen2, out=phen2)
+    np.dot(snps_mask.T, phen2, out=yty)
+    np.dot(snps_mask.T, traits_mask, out=nobs)
+
+    det = s11 * s22 - s12 * s12
+    det[det <= 0] = np.nan
+    inv11 = s22 / det
+    inv22 = s11 / det
+    inv12 = -s12 / det
+
+    beta_add_joint = inv11 * x1ty + inv12 * x2ty
+    beta_dom_joint = inv12 * x1ty + inv22 * x2ty
+
+    rss_ad = yty - (beta_add_joint * x1ty + beta_dom_joint * x2ty)
+    rss_ad[rss_ad < 0] = 0
+    if dof != 'incorrect':
+        df_joint = nobs - (3 if center else 2)
+    else:
+        df_joint = np.broadcast_to(traits_mask.sum(axis=0) - (3 if center else 2), rss_ad.shape).astype(float, copy=True)
+    df_joint[df_joint <= 0] = np.nan
+    sigma2_joint = rss_ad / df_joint
+
+    se_add_joint = np.sqrt(sigma2_joint * inv11)
+    se_dom_joint = np.sqrt(sigma2_joint * inv22)
+    stat_add_joint = beta_add_joint / se_add_joint
+    stat_dom_joint = beta_dom_joint / se_dom_joint
+
+    p_add_joint = scipyt.sf(np.abs(stat_add_joint), df=df_joint)
+    p_dom_joint = scipyt.sf(np.abs(stat_dom_joint), df=df_joint)
+    if sided == 'two-sided':
+        p_add_joint *= 2
+        p_dom_joint *= 2
+
+    beta_add, se_add, stat_add, neglog_p_add, df_add = regression_with_blas(
+        sadd, straits, snps_mask, traits_mask, dof=dof, stat='ttest', sided=sided, center=center
+    )
+
+    rss_add = (se_add ** 2) * df_add * np.where(np.isnan(s11), np.nan, s11)
+    numerator = rss_add - rss_ad
+    numerator[numerator < 0] = 0
+    f_stat = numerator / np.where(df_joint > 0, rss_ad / df_joint, np.nan)
+    p_avsad = scipyf.sf(f_stat, 1, df_joint)
+
+    dominance_ratio = np.abs(stat_dom_joint / stat_add_joint)
+    dominance_log2_ratio = np.log2(dominance_ratio)
+    dominance_class = _dominance_class_from_ratio(dominance_ratio)
+
+    return {
+        'beta_additive': beta_add,
+        'beta_additive_se': se_add,
+        'stat_additive': stat_add,
+        'neglog_p_additive': neglog_p_add,
+        'dof_additive': df_add,
+        'beta_add_joint': beta_add_joint,
+        'beta_add_joint_se': se_add_joint,
+        'stat_add_joint': stat_add_joint,
+        'neglog_p_add_joint': _neglog10_pvalues(p_add_joint),
+        'beta_dominance': beta_dom_joint,
+        'beta_dominance_se': se_dom_joint,
+        'stat_dominance': stat_dom_joint,
+        'neglog_p_dominance': _neglog10_pvalues(p_dom_joint),
+        'f_stat_avsad': f_stat,
+        'neglog_p_avsad': _neglog10_pvalues(p_avsad),
+        'dof_joint': df_joint,
+        'dominance_ratio': dominance_ratio,
+        'dominance_log2_ratio': dominance_log2_ratio,
+        'dominance_class': dominance_class,
+    }
+
+
+def regression_add_dom_with_einsum(sadd, sdom, straits, snps_mask, traits_mask, dof='correct', sided='two-sided', center=True):
+    if sided not in ['two-sided', 'one-sided']:
+        raise ValueError("sided must be 'two-sided' or 'one-sided'")
+    x1ty = np.einsum("ij,ik->jk", sadd, straits, optimize=True)
+    x2ty = np.einsum("ij,ik->jk", sdom, straits, optimize=True)
+    s11 = np.einsum("ij,ij,ik->jk", sadd, sadd, traits_mask, optimize=True)
+    s22 = np.einsum("ij,ij,ik->jk", sdom, sdom, traits_mask, optimize=True)
+    s12 = np.einsum("ij,ij,ik->jk", sadd, sdom, traits_mask, optimize=True)
+    phen = straits * traits_mask
+    yty = np.einsum("ij,ik,ik->jk", snps_mask, phen, phen, optimize=True)
+    nobs = np.einsum("ij,ik->jk", snps_mask, traits_mask, optimize=True)
+
+    det = s11 * s22 - s12 * s12
+    det[det <= 0] = np.nan
+    inv11 = s22 / det
+    inv22 = s11 / det
+    inv12 = -s12 / det
+
+    beta_add_joint = inv11 * x1ty + inv12 * x2ty
+    beta_dom_joint = inv12 * x1ty + inv22 * x2ty
+    rss_ad = yty - (beta_add_joint * x1ty + beta_dom_joint * x2ty)
+    rss_ad[rss_ad < 0] = 0
+    if dof != 'incorrect':
+        df_joint = nobs - (3 if center else 2)
+    else:
+        df_joint = np.broadcast_to(traits_mask.sum(axis=0) - (3 if center else 2), rss_ad.shape).astype(float, copy=True)
+    df_joint[df_joint <= 0] = np.nan
+    sigma2_joint = rss_ad / df_joint
+
+    se_add_joint = np.sqrt(sigma2_joint * inv11)
+    se_dom_joint = np.sqrt(sigma2_joint * inv22)
+    stat_add_joint = beta_add_joint / se_add_joint
+    stat_dom_joint = beta_dom_joint / se_dom_joint
+
+    p_add_joint = scipyt.sf(np.abs(stat_add_joint), df=df_joint)
+    p_dom_joint = scipyt.sf(np.abs(stat_dom_joint), df=df_joint)
+    if sided == 'two-sided':
+        p_add_joint *= 2
+        p_dom_joint *= 2
+
+    beta_add, se_add, stat_add, neglog_p_add, df_add = regression_with_einsum(
+        sadd, straits, snps_mask, traits_mask, dof=dof, stat='ttest', sided=sided, center=center
+    )
+
+    rss_add = (se_add ** 2) * df_add * np.where(np.isnan(s11), np.nan, s11)
+    numerator = rss_add - rss_ad
+    numerator[numerator < 0] = 0
+    f_stat = numerator / np.where(df_joint > 0, rss_ad / df_joint, np.nan)
+    p_avsad = scipyf.sf(f_stat, 1, df_joint)
+
+    dominance_ratio = np.abs(stat_dom_joint / stat_add_joint)
+    dominance_log2_ratio = np.log2(dominance_ratio)
+    dominance_class = _dominance_class_from_ratio(dominance_ratio)
+
+    return {
+        'beta_additive': beta_add,
+        'beta_additive_se': se_add,
+        'stat_additive': stat_add,
+        'neglog_p_additive': neglog_p_add,
+        'dof_additive': df_add,
+        'beta_add_joint': beta_add_joint,
+        'beta_add_joint_se': se_add_joint,
+        'stat_add_joint': stat_add_joint,
+        'neglog_p_add_joint': _neglog10_pvalues(p_add_joint),
+        'beta_dominance': beta_dom_joint,
+        'beta_dominance_se': se_dom_joint,
+        'stat_dominance': stat_dom_joint,
+        'neglog_p_dominance': _neglog10_pvalues(p_dom_joint),
+        'f_stat_avsad': f_stat,
+        'neglog_p_avsad': _neglog10_pvalues(p_avsad),
+        'dof_joint': df_joint,
+        'dominance_ratio': dominance_ratio,
+        'dominance_log2_ratio': dominance_log2_ratio,
+        'dominance_class': dominance_class,
+    }
+
+def GWA(traits, snps, dtype = 'pandas_highmem', precision=np.float32, stat = 'ttest', sided = 'two-sided',dof='correct', center =True, scale = True, regression_mode = 'blas', model='additive' ):
     if isinstance(snps, tuple) and len(snps)==3: ssnps, snps_std, snps_mask = snps
     else: ssnps, snps_std, snps_mask = scale_with_mask(snps, precision = precision, center = center, scale = scale)
     if isinstance(traits, tuple) and len(traits)==3: straits, traits_std, traits_mask = traits
     else: straits, traits_std, traits_mask = scale_with_mask(traits, precision = precision, center = center, scale = scale)
+    if model not in ['additive', 'add-dom']:
+        raise ValueError("model has to be in ['additive', 'add-dom']")
+    if model == 'add-dom':
+        dom_snps = dominance_encoding(snps, precision=precision)
+        sdom, dom_std, dom_mask = scale_with_mask(dom_snps, precision=precision, center=center, scale=scale)
+        dom_mask = np.minimum(snps_mask, dom_mask)
+        if regression_mode == 'blas':
+            results = regression_add_dom_with_blas(ssnps, sdom, straits, dom_mask, traits_mask, dof=dof, sided=sided, center=center)
+        elif regression_mode == 'einsum':
+            results = regression_add_dom_with_einsum(ssnps, sdom, straits, dom_mask, traits_mask, dof=dof, sided=sided, center=center)
+        else:
+            raise ValueError("regression_mode has to be in ['blas', 'einsum']")
+        snp_names, trait_names = list(snps.columns), [t.split('__subtractgrm')[0] for t in traits.columns]
+        out = {'snp': np.repeat(snp_names, len(traits.columns)), 'trait': np.tile(trait_names, len(snps.columns))}
+        for metric, arr in results.items():
+            out[metric] = arr.ravel(order='C') if not isinstance(arr, np.ndarray) or arr.ndim == 2 else arr.ravel(order='C')
+        return pd.DataFrame(out)
     if regression_mode == 'blas':
         results = regression_with_blas(ssnps, straits, snps_mask, traits_mask, dof = dof, stat = stat, sided = sided, center = center)
     if regression_mode == 'einsum':
@@ -843,13 +1060,17 @@ def GWA(traits, snps, dtype = 'pandas_highmem', precision=np.float32, stat = 'tt
     return results
 
 def GWAS(traitdf, genotypes = 'genotypes/genotypes', grms_folder = 'grm', save = True , y_correction  = 'ystar',
-         save_path = 'results/gwas/', return_table = True, stat = 'ttest', dtype = 'pandas_highmem',dof='correct'):
+         save_path = 'results/gwas/', return_table = True, stat = 'ttest', dtype = 'pandas_highmem',dof='correct',
+         model='additive', center=True, scale=True, chrlist=None, regression_mode='blas'):
     res = []
     read_gen = load_plink(genotypes)
     chrunique =[str(x) for x in read_gen[0].chrom.unique()]
     grms = load_all_grms(f'{grms_folder}/*.grm.bin', decompose_grm=False)
     tdf = traitdf.loc[grms.loc[ 'All', 'subtracted_grm'].index, :]
     chrs2run = grms.index[~grms.index.str.contains('^All$')].to_list()
+    if chrlist is not None:
+        keep = {str(c).lower().replace('chr', '') for c in chrlist}
+        chrs2run = [c for c in chrs2run if str(c).lower().replace('chr', '') in keep]
     for C in tqdm(chrs2run,position=0, desc = 'running Chr'):
         if y_correction=='blup_resid':
             traits =  tdf - pd.concat([rm_relatedness(C,_t,tdf,grms, svd_input=False)['blup'] for _t in tdf.columns], axis = 1).rename(lambda x: x.split('__')[0], axis = 1)
@@ -863,12 +1084,13 @@ def GWAS(traitdf, genotypes = 'genotypes/genotypes', grms_folder = 'grm', save =
         if not (snps.index == traits.index).all(): 
             print('reordering snps to align with traits')
             snps =snps.loc[traits.index]
+        suffix = '.parquet.gz' if model == 'additive' else '.addom.parquet.gz'
         if return_table: 
-            res += [GWA(traits, snps, dtype=dtype, stat=stat, dof=dof)]
-            if save: res[-1].to_parquet(f'{save_path}gwas{C}.parquet.gz', compression='gzip', engine = 'pyarrow',  compression_level=1, use_dictionary=True)
+            res += [GWA(traits, snps, dtype=dtype, stat=stat, dof=dof, model=model, center=center, scale=scale, regression_mode=regression_mode)]
+            if save: res[-1].to_parquet(f'{save_path}gwas{C}{suffix}', compression='gzip', engine = 'pyarrow',  compression_level=1, use_dictionary=True)
         else: 
-            if save: GWA(traits, snps, dtype=dtype, stat=stat, dof=dof)\
-                           .to_parquet(f'{save_path}gwas{C}.parquet.gz', compression='gzip',  engine = 'pyarrow',  compression_level=1, use_dictionary=True) #use_byte_stream_split=True
+            if save: GWA(traits, snps, dtype=dtype, stat=stat, dof=dof, model=model, center=center, scale=scale, regression_mode=regression_mode)\
+                           .to_parquet(f'{save_path}gwas{C}{suffix}', compression='gzip',  engine = 'pyarrow',  compression_level=1, use_dictionary=True) #use_byte_stream_split=True
     if return_table: 
         if 'pandas' not in dtype: return res
         return pd.concat(res)
@@ -1036,11 +1258,3 @@ def cityblock(X, Y=None,  axis = 'rows', dtype = np.float32, scale = True):
                                             Y.values  if isinstance(Y, pd.DataFrame) else Y, 
                                             axis = axis, dtype = dtype, scale = scale), 
                         index = rindex, columns = rcolumns)
-
-
-
-
-
-
-
-    
