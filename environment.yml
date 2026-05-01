@@ -14,6 +14,11 @@ dependencies:
   - pyarrow
   - matplotlib
   - tqdm
+  - bokeh
+  - holoviews
+  - hvplot
+  - datashader
+  - colorcet
   - pip
   - pip:
       - -e .
