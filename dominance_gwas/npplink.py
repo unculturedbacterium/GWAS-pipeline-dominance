@@ -762,6 +762,18 @@ def _dominance_class_from_ratio(ratio):
     out[valid & (ratio >= 1.2)] = 'OD'
     return out
 
+
+def _safe_dominance_ratio(stat_dom_joint, stat_add_joint):
+    stat_dom_joint = np.asarray(stat_dom_joint, dtype=np.float64)
+    stat_add_joint = np.asarray(stat_add_joint, dtype=np.float64)
+    ratio = np.full(stat_dom_joint.shape, np.nan, dtype=np.float64)
+    valid = np.isfinite(stat_dom_joint) & np.isfinite(stat_add_joint) & (np.abs(stat_add_joint) > 0)
+    ratio[valid] = np.abs(stat_dom_joint[valid] / stat_add_joint[valid])
+    log2_ratio = np.full(ratio.shape, np.nan, dtype=np.float64)
+    valid_ratio = np.isfinite(ratio) & (ratio > 0)
+    log2_ratio[valid_ratio] = np.log2(ratio[valid_ratio])
+    return ratio, log2_ratio
+
 def regression_with_einsum(ssnps, straits, snps_mask, traits_mask,dof='correct', stat = 'ttest', sided = 'two-sided', center = True,):
     if sided not in ['two-sided','one-sided']: raise ValueError("sided must be 'two-sided' or 'one-sided'")
     if stat  not in ['ttest', 'wald', 'score']: raise ValueError("stat must be 'ttest' or 'wald'")
@@ -910,8 +922,7 @@ def regression_add_dom_with_blas(sadd, sdom, straits, snps_mask, traits_mask, do
     f_stat = numerator / np.where(df_joint > 0, rss_ad / df_joint, np.nan)
     p_avsad = scipyf.sf(f_stat, 1, df_joint)
 
-    dominance_ratio = np.abs(stat_dom_joint / stat_add_joint)
-    dominance_log2_ratio = np.log2(dominance_ratio)
+    dominance_ratio, dominance_log2_ratio = _safe_dominance_ratio(stat_dom_joint, stat_add_joint)
     dominance_class = _dominance_class_from_ratio(dominance_ratio)
 
     return {
@@ -987,8 +998,7 @@ def regression_add_dom_with_einsum(sadd, sdom, straits, snps_mask, traits_mask, 
     f_stat = numerator / np.where(df_joint > 0, rss_ad / df_joint, np.nan)
     p_avsad = scipyf.sf(f_stat, 1, df_joint)
 
-    dominance_ratio = np.abs(stat_dom_joint / stat_add_joint)
-    dominance_log2_ratio = np.log2(dominance_ratio)
+    dominance_ratio, dominance_log2_ratio = _safe_dominance_ratio(stat_dom_joint, stat_add_joint)
     dominance_class = _dominance_class_from_ratio(dominance_ratio)
 
     return {
