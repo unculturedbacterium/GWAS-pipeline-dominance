@@ -11,6 +11,7 @@ from scipy.stats import t as scipyt
 from scipy.stats import chi2
 from scipy.special import stdtr, erfc
 from tqdm import tqdm
+tqdm.pandas()
 import itertools
 from typing import Literal
 from scipy.linalg import blas
